@@ -2,7 +2,7 @@
 // Zapojení na Arduino Uno / Uno 328PB:
 //   D8  = SCLK (P1[1])
 //   D11 = XRES
-//   D12 = SDATA (P1[0]) -> vyžaduje vnější Pull-up rezistor (4.7k - 10k) k VCC
+//   D12 = SDATA (P1[0]) -> vyžaduje vnější Pull-up rezistor (4.7k - 10k) k VCC - funční i bez něj
 //   D13 = LED diagnostika
 //   5V / 3.3V a GND
 

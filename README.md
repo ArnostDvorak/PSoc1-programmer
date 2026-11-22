@@ -16,6 +16,13 @@ Connections:
 | D11 | XRES |
 | D12 | SDA |
 
+## Behaviour (fw 0004)
+
+* After the Arduino starts (power-up, or the DTR auto-reset when the COM port is opened) SCLK, SDATA and XRES are high-impedance, so the PSoC keeps running its own program. XRES is held low by the pull-down on the target board.
+* The PSoC enters programming mode only on the first command that needs it (`d`, `D`, `c`, `C`, `e`, `w`, `r`, `x`) or on `i`.
+* `a` (or 3 s without any command) resets the PSoC, releases all pins and lets the PSoC run.
+* Hardware tips if the programmer stays connected: do not connect +5V when the target has its own supply, and optionally add 220-330 R in series with SCLK, SDATA and XRES.
+
 ## Programmer
 Programmer options:
 ```

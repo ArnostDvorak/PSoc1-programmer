@@ -5,6 +5,15 @@
 //   D12 = SDATA (P1[0]) -> vyžaduje vnější Pull-up rezistor (4.7k - 10k) k VCC - funční i bez něj
 //   D13 = LED diagnostika
 //   5V / 3.3V a GND
+//
+// Chování (fw 0004):
+//   - Po startu Arduina (i po resetu přes DTR při otevření COM portu)
+//     jsou SCLK, SDATA i XRES ve vysoké impedanci a PSoC běží normálně.
+//     XRES drží v nule pull-down na desce (WBOOS: R10 10k).
+//   - Do programovacího režimu se PSoC přepne až prvním příkazem,
+//     který ho potřebuje (d, D, c, C, e, w, r, x), nebo příkazem i.
+//   - Příkaz a, nebo 3 s bez příkazu: reset PSoC, uvolnění pinů,
+//     PSoC spustí svůj program.
 
 #include <Arduino.h>
 #include <avr/io.h>
@@ -41,13 +50,27 @@
 
 #define PULL_TIMEOUT_MS 500
 
+// Po této době bez příkazu se PSoC pustí z programovacího režimu
+#define IDLE_RELEASE_MS 3000
+
 uint16_t dev_id = 0;
 uint8_t ram_blk[64];
 
 // 0 = OK, jinak číslo kroku, kde čip neodpověděl
 uint8_t err = 0;
 
-const uint16_t fw = 0x0003;
+const uint16_t fw = 0x0004;
+
+// true = PSoC je v programovacím režimu (jeho CPU neběží)
+bool prog_mode = false;
+uint32_t last_cmd_ms = 0;
+
+// SCLK, SDATA i XRES do vysoké impedance, bez interních pull-upů
+void release_pins() {
+  DDRB  &= ~(SCL_PIN | SDA_PIN | RES_PIN);
+  PORTB &= ~(SCL_PIN | SDA_PIN | RES_PIN | LED_PIN);
+  DDRB  |= LED_PIN;
+}
 
 void data_send(const uint8_t *data, uint16_t len) {
   uint16_t k;
@@ -144,18 +167,32 @@ uint8_t read_byte(uint8_t cmd) {
   return buf[1];
 }
 
-void reset_device() {
-  DDRB |= RES_PIN;
+// Pulz na XRES (aktivní v H), XRES zůstane jako výstup v L
+void xres_pulse() {
+  PORTB &= ~RES_PIN;
+  DDRB  |= RES_PIN;
   PORTB |= RES_PIN;
   _delay_us(XRES_PULSE_US);
   PORTB &= ~RES_PIN;
 }
 
+// Ukončí programovací režim: SCLK/SDATA uvolní, resetuje PSoC
+// a uvolní i XRES. PSoC pak spustí svůj program.
+void run_target() {
+  DDRB  &= ~(SCL_PIN | SDA_PIN);
+  PORTB &= ~(SCL_PIN | SDA_PIN);
+  xres_pulse();
+  release_pins();
+  prog_mode = false;
+}
+
 void initialise() {
   err = 0;
+  PORTB &= ~(SCL_PIN | SDA_PIN);
   DDRB |= (SCL_PIN | SDA_PIN | LED_PIN | RES_PIN);
-  reset_device();
-  
+  xres_pulse();
+  prog_mode = true;
+
   data_send(init1, init1_len);
   if (!pull_or_fail(1)) return;
   
@@ -164,6 +201,19 @@ void initialise() {
   
   // Pozor: Pokud používáte 3.3V napájení, změňte init3_5V na init3 a init3_5V_len na init3_len
   data_send(init3_5V, init3_5V_len);
+}
+
+// Vstup do programovacího režimu (s načtením ID), pokud v něm PSoC ještě není.
+// false = čip neodpověděl; PSoC se resetuje a piny se uvolní.
+bool ensure_prog() {
+  if (prog_mode && err == 0) return true;
+  initialise();
+  dev_id = read_id();
+  if (err) {
+    run_target();
+    return false;
+  }
+  return true;
 }
 
 uint16_t read_id() {
@@ -252,7 +302,9 @@ void pin_test() {
 }
 
 void print_status() {
-  if (err == 0) {
+  if (!prog_mode && err == 0) {
+    Serial.println(F("PSoC bezi, programator uvolnen"));
+  } else if (err == 0) {
     Serial.print(F("PSoC OK, ID=0x"));
     Serial.println(dev_id, HEX);
   } else {
@@ -262,42 +314,51 @@ void print_status() {
 }
 
 void setup(void) {
+  release_pins();        // PSoC nechat běžet, nic na něj nepouštět
   Serial.begin(9600);
-  initialise();
-  dev_id = read_id();
-  print_status();
+  Serial.print(F("PSoC1 prog fw "));
+  Serial.println(fw, HEX);
   Serial.print(F("> "));
 }
 
 void loop() {
   uint8_t command;
+
+  // Zapomenutý programovací režim: po čase bez příkazu PSoC pustit
+  if (prog_mode && (millis() - last_cmd_ms > IDLE_RELEASE_MS)) {
+    run_target();
+  }
+
   if (Serial.readBytes(&command, 1) > 0) {
+    last_cmd_ms = millis();
     if (command == 'd') {
+      ensure_prog();
       Serial.println(dev_id, HEX);
     }
     else if (command == 'D') {
+      ensure_prog();
       Serial.write(dev_id);
       Serial.write(dev_id >> 8);
       Serial.println();
     }
     else if (command == 'i') {
-      initialise();
-      dev_id = read_id();
+      prog_mode = false;   // vynutit novou inicializaci
+      ensure_prog();
       Serial.println();
     }
     else if (command == 'r') {
       uint8_t args[2] = {0x00, 0x80};
       Serial.readBytes(args, 2);
-      read_block(args[0], args[1]);
+      if (ensure_prog()) read_block(args[0], args[1]);
       Serial.println();
     }
     else if (command == 'e') {
-      erase_all_memory();
+      if (ensure_prog()) erase_all_memory();
       Serial.println();
     }
     else if (command == 'w') {
       if (Serial.readBytes(&command, 1) > 0) {
-        write_block(dev_id, command);
+        if (ensure_prog()) write_block(dev_id, command);
       }
       Serial.println();
     }
@@ -310,10 +371,11 @@ void loop() {
       Serial.println();
     }
     else if (command == 'c') {
-      Serial.println(read_checksum(dev_id), HEX);
+      uint16_t cs = ensure_prog() ? read_checksum(dev_id) : 0;
+      Serial.println(cs, HEX);
     }
     else if (command == 'C') {
-      uint16_t cs = read_checksum(dev_id);
+      uint16_t cs = ensure_prog() ? read_checksum(dev_id) : 0;
       Serial.write(cs);
       Serial.write(cs >> 8);
       Serial.println();
@@ -327,11 +389,11 @@ void loop() {
       Serial.println();
     }
     else if (command == 'x') {
-      write_secure();
+      if (ensure_prog()) write_secure();
       Serial.println();
     }
-    else if (command == 'a') {
-      reset_device();
+    else if (command == 'a') {   // Reset PSoC a uvolnění programátoru
+      run_target();
       Serial.println();
     }
     else if (command == '?') {   // Diagnostika
@@ -346,6 +408,7 @@ void loop() {
     else {
       Serial.println(F("invalid"));
     }
+    last_cmd_ms = millis();
     Serial.print(F("> "));
   }
 }

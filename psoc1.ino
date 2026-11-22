@@ -203,6 +203,8 @@ void initialise() {
   data_send(init3_5V, init3_5V_len);
 }
 
+uint16_t read_id();
+
 // Vstup do programovacího režimu (s načtením ID), pokud v něm PSoC ještě není.
 // false = čip neodpověděl; PSoC se resetuje a piny se uvolní.
 bool ensure_prog() {
